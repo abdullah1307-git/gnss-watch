@@ -18,6 +18,7 @@ import io
 import json
 import logging
 import tarfile
+import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -90,7 +91,38 @@ def download_day(
     return paths
 
 
-def _download_resumable(s: requests.Session, asset: Asset, path: Path) -> None:
+RETRYABLE = (
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
+
+
+def _download_resumable(
+    s: requests.Session,
+    asset: Asset,
+    path: Path,
+    max_attempts: int = 10,
+    backoff_s: float = 5.0,
+) -> None:
+    """Download one asset, resuming after dropped connections (up to ``max_attempts``)."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            _download_once(s, asset, path)
+            return
+        except RETRYABLE as exc:
+            if attempt == max_attempts:
+                raise
+            wait = min(backoff_s * attempt, 60.0)
+            have = path.stat().st_size if path.exists() else 0
+            log.warning(
+                "%s: connection dropped at %.0f MiB (%s). Resuming in %.0f s (attempt %d of %d)",
+                asset.name, have / CHUNK, type(exc).__name__, wait, attempt + 1, max_attempts,
+            )
+            time.sleep(wait)
+
+
+def _download_once(s: requests.Session, asset: Asset, path: Path) -> None:
     have = path.stat().st_size if path.exists() else 0
     if asset.size and have == asset.size:
         log.info("already complete: %s", path.name)
